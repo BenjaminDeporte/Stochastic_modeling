@@ -47,7 +47,7 @@ class BayesianMLP(PyroModule):
         # the attribute name itself (self.log_sigma in this case) becomes the name of the stochastic site in the model's trace. 
         # Therefore, you should not pass the name as a string argument to PyroSample.   
         
-    def forward(self,x, y=None):
+    def forward(self,x, y=None, **kwargs):
         x = x.reshape(-1,1)
         for layer in self.layers:
             x = self.activation(layer(x))
