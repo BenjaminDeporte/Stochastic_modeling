@@ -42,7 +42,7 @@ architecture = {
     "D_X" : 1,
     "D_Y" : 1,
     "N_LAYERS" : 2,  # number of hidden layers size D_H neurons
-    "D_H" : 5,
+    "D_H" : 16,
 }
 
 #------------------------------------------------------------------
@@ -140,8 +140,8 @@ def NumpyroBNN(X, architecture, y=None):
     # NB  -there is a potential bug here if the model is trained with y=None (D_Y=1) and inference is run with D_Y > 1
     
     # priors    
-    WEIGHT_PRIOR_STD = 0.05
-    BIAS_PRIOR_STD = 0.05
+    WEIGHT_PRIOR_STD = 1.0
+    BIAS_PRIOR_STD = 0.1
     
     weights = {}
     # -- first layer : X (N, D_X) @ W1 (D_X, D_H) + B1 (D_H) => X2 (N, D_H)
@@ -162,30 +162,34 @@ def NumpyroBNN(X, architecture, y=None):
     W_mu = numpyro.sample("W_mu", dist.Normal(0.0, WEIGHT_PRIOR_STD/jnp.sqrt(D_H)).expand([D_H, D_Y]).to_event(2))
     B_mu = numpyro.sample("B_mu", dist.Normal(0.0, BIAS_PRIOR_STD).expand([D_Y]).to_event(1))
     weights["mu"] = {"W":W_mu, "B":B_mu}
-    W_logsig = numpyro.sample("W_logsig", dist.Normal(0, 0.01/jnp.sqrt(D_H)).expand([D_H, D_Y]).to_event(2))
-    B_logsig = numpyro.sample("B_logsig", dist.Normal(-2.0, 0.5).expand([D_Y]).to_event(1))
+    # heteroskedastic noise
+    W_logsig = numpyro.sample("W_logsig", dist.Normal(0.0, 0.1/jnp.sqrt(D_H)).expand([D_H, D_Y]).to_event(2))
+    B_logsig = numpyro.sample("B_logsig", dist.Normal(-2.0, 0.1).expand([D_Y]).to_event(1))
     weights["logsig"] = {"W":W_logsig, "B":B_logsig}
     
     # compute the forward pass
-    mu, logsig = forward(X, weights)
+    mu, logsig = forward(X, weights)  # (N, D_Y)
     # check numerical stability for log sigma and sigma
-    sigma = jnp.exp(logsig) + 1e-6
+    # heteroskedastic noise
+    sigma = jnp.exp(logsig) + 1e-6   # (N, D_Y)
        
     # observe data
-    with numpyro.plate("data", N):
-        # 1. BEFORE plate:
-        #    1) X4 (N, D_Y), noise (D_Y,) 
-        #    2) broadcast noise (D_Y,) => (N, D_Y)
-        #    3) dist.Normal(X4,noise) => batch_shape = (N, D_Y), event_shape =() ie : N,D_Y independent scalar normal variables
-        # 2. ACTION of with numpyro.plate("data",N):
-        #    1) meaning : the leftmost batch dimension of (size N) is conditionally independent, operations will be vectorized
-        #    2) AFTER plate, the remaining batch dimension is (D_Y,). event shape remains ()
-        #    3) at this point, Numpyro understands that there are N independent observations, 
-        #       each observation being a set of D_Y independent scalar random variables
-        #    4) to_event(1) converts one batch dimension to an event dimension :
-        #       batch,event = D_Y,() => (),D_Y
-        #    NB : to_event(k) means that k is the number of dimensions of the event
-        numpyro.sample("ys", dist.Normal(mu, sigma).to_event(1), obs=target)
+    # with numpyro.plate("data", N):
+    #     # 1. BEFORE plate:
+    #     #    1) mu (N, D_Y), sigma (N, D_Y) 
+    #     #    2) dist.Normal(mu,sigma) => batch_shape = (N, D_Y), event_shape =() ie : N,D_Y independent scalar normal variables
+    #     # 2. ACTION of with numpyro.plate("data",N):
+    #     #    1) meaning : the leftmost batch dimension of (size N) is conditionally independent, operations will be vectorized
+    #     #    2) AFTER plate, the remaining batch dimension is (D_Y,). event shape remains ()
+    #     #    3) at this point, Numpyro understands that there are N independent observations, 
+    #     #       each observation being a set of D_Y independent scalar random variables
+    #     #    4) to_event(1) converts one batch dimension to an event dimension :
+    #     #       batch,event = D_Y,() => (),D_Y
+    #     #    NB : to_event(k) means that k is the number of dimensions of the event
+    #     numpyro.sample("ys", dist.Normal(mu, sigma).to_event(1), obs=target)
+    
+    # likelihood with no plate (option)
+    numpyro.sample("ys", dist.Normal(mu, sigma).to_event(1), obs=target)  # batch=N, event=D_Y
 
 #---------------------------------------------------------------------------------
 
@@ -206,7 +210,7 @@ def execute_main():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         
-    # seed_everything()
+    seed_everything()
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -230,18 +234,18 @@ def execute_main():
     # LOAD DATA - simple sine wave
     #------------------------------------------------------------------
     
-    N_POINTS = 100
-    NOISE = 0.05
-    SCALE = 0.1
+    N_POINTS = 250
+    NOISE = 0.15
+    SCALE = 1.0
     # -- train / reconstruction
     X = np.linspace(0.0,1.0,N_POINTS)
-    y = SCALE * np.sin(2*np.pi*X) + np.random.normal(0.0,NOISE,size=N_POINTS)
+    y = SCALE * X * np.sin(16*np.pi*X) + np.random.normal(0.0,NOISE,size=N_POINTS)
     X = X.reshape(-1,1)
     y = y.reshape(-1,1)
     
     # -- test / forecast
     X_test = np.linspace(0.0,2.0,2*N_POINTS)
-    y_test = SCALE * np.sin(2*np.pi*X_test) + np.random.normal(0.0,NOISE,size=2*N_POINTS)
+    y_test = SCALE * X_test * np.sin(16*np.pi*X_test) + np.random.normal(0.0,NOISE,size=2*N_POINTS)
     X_test = X_test.reshape(-1,1)
     y_test = y_test.reshape(-1,1)
     
@@ -276,19 +280,20 @@ def execute_main():
     for i in range(NS):
         ax.plot(mu_prior[i].squeeze(), color='blue', alpha=0.2)
     ax.grid()
-    ax.legend()
+    # ax.legend()
+    fig.suptitle(f'Priors check')
     plt.show()
     
     #------------------------------------------------------------------------
     # RUNNING MCMC !!
     #------------------------------------------------------------------------
     
-    N_WARMUP = 1500
-    N_SAMPLES = 50
+    N_WARMUP = 1000
+    N_SAMPLES = 100
     
     print(f'\nTesting BNN and MCMC on a sine wave toy set - noise level = {NOISE} - WARM_UPs {N_WARMUP}, N_SAMPLES {N_SAMPLES}')
     assert architecture is not None, "Must provide an architecture for the probabilistic model !"
-    print(f'Model architecture : {architecture}')
+    print(f'Model architecture : {architecture} - HETEROSKEDASTIC noise')
     
     kernel = NUTS(NumpyroBNN)
     MCMC_runner = MCMC(
@@ -346,8 +351,8 @@ def execute_main():
     y_high_ci = (y_mean + 1.96 * np.mean(sigma_preds, axis=0)).squeeze()
     
     fig,ax = plt.subplots(figsize=(12,6))
-    ax.scatter(X, y, marker='x', color='green', label='ground truth (training)')
-    ax.scatter(X_test, y_test, marker='x', color='orange', label='test set')
+    ax.scatter(X, y, marker='.', color='green', label='ground truth (training)')
+    ax.scatter(X_test, y_test, marker='.', color='orange', label='test set')
     ax.scatter(X_test, y_mean, marker='.', color='blue', label='moyenne predictions')
     ax.fill_between(
         x=X_test.squeeze(),
